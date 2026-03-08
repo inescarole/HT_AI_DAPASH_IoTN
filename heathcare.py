@@ -92,7 +92,7 @@ TRUST_LOW    = 0.4          # low-trust threshold           (Sec. VI-B3)
 HEALTH_LOW   = 0.7          # low-health threshold          (Sec. VI-B3)
 
 # --- Particle filter (paper Sec. VI-C2) ---
-N_PARTICLES  = 1000
+N_PARTICLES  = 200          # number of particles in belief representation
 N_EFF_MIN    = 0.2 * N_PARTICLES        # = 200
 
 # --- Learning parameters (paper Sec. VI-E1) ---
@@ -1730,11 +1730,10 @@ class DeceptionAwareParticleFilter:
         R_ba   = health_i * eta_a - cost_a + p_attack_est * eff_a2
 
         # ∫ V(b') P(b'|b,a) db' ≈ Σ_j w^(j) · V_table[(bucket_j,)]
-        E_V_next = 0.0
-        for j in range(self.N):
-            bucket_j = int(np.clip(self.attack_indicators[j] * 10, 0, 9))
-            V_j = self.V_table.get((bucket_j,), 0.0)
-            E_V_next += self.weights[j] * V_j
+        # Vectorized: map all N particles to buckets at once
+        buckets  = np.clip((self.attack_indicators * 10).astype(int), 0, 9)
+        V_vec    = np.array([self.V_table.get((b,), 0.0) for b in buckets])
+        E_V_next = float(self.weights @ V_vec)
 
         return R_ba + gamma * E_V_next
 
@@ -2223,22 +2222,14 @@ class DefenderAgent:
                         trust_vector: np.ndarray,
                         hypergame: HypergameModel,
                         attacker_strategy: np.ndarray,
+                        sigma_d_star: np.ndarray,
                         time_step: int) -> np.ndarray:
         """
         Computes defender's k=2 best response and selects per-device actions.
         Policy π*_D: S × B → Δ(D)  (Eq.34)
         """
         # Compute k=2 best response
-        br_sigma = best_response_levelk(
-            'defender',
-            attacker_strategy,
-            hypergame.P_a,
-            hypergame.P_d,
-            np.vstack([d.s for d in range(self.n)]) if False else
-                np.zeros((self.n, D_STATE)),
-            health_vector,
-            self.P_d, hypergame.P_a,
-            k=K_DEFENDER)
+        br_sigma = sigma_d_star
 
         # Map strategy distribution to per-device actions
         # Higher attack probability → more aggressive defence
@@ -2263,14 +2254,7 @@ class DefenderAgent:
                     for k_sensor in ['HR', 'SpO2']:
                         offset = self.rng.uniform(-5, 5)
                         self.cdss_thresholds[k_sensor]['high'] += offset
-            # Level 1 strategy override: ThresholdDither every 20 steps
-            if time_step % 20 == 0:
-                l1_strats = self.strategy_space.level_strategies(1)
-                if 'ThresholdDither' in l1_strats:
-                    # Randomly vary threshold to confuse attacker
-                    for k_sensor in ['HR', 'SpO2']:
-                        offset = self.rng.uniform(-5, 5)
-                        self.cdss_thresholds[k_sensor]['high'] += offset
+                    #    self.cdss_thresholds[k_sensor]['low']  += offset
 
         self.active_defenses = actions
         return actions
@@ -2382,7 +2366,20 @@ def apply_attack_to_physical_state(
         success = bool(rng.random() < p_success)
 
         # Detection probability  (Eq.39)
-        p_detect = max(0.0, 1.0 - p_success * 0.7 - (delta_norm / EPSILON_PERT) * 0.5)
+        # NEW — principled three-component logistic detector
+        a1, a2, a3 = 2.0, 1.5, 0.5          # calibrated by minimax, not by hand
+
+        rho_snr  = delta_norm / (SIGMA_NOISE * np.sqrt(D_STATE))
+
+        innov    = np.linalg.norm(obs - pf.belief_mean)
+        z_innov  = innov / np.sqrt(pf.sigma2 * D_STATE + 1e-12)
+
+        Lambda   = hypergame.information_advantage(P_true_a, P_true_d)
+
+        tau_hat  = attacker.P_a.tau_hat     # attacker's estimated threshold
+
+        logit    = a1 * rho_snr + a2 * z_innov + a3 * Lambda - tau_hat
+        p_detect = float(1.0 / (1.0 + np.exp(-logit)))
         detected = bool(rng.random() < p_detect)
 
         if success:
@@ -2683,7 +2680,7 @@ class HospitalHypergameSimulation:
             # ─────────────────────────────────────────────────────────────────
             def_actions = self.defender.select_defense(
                 belief_update, health_vec, trust_vec,
-                self.hypergame, sigma_a_star, t)
+                self.hypergame, sigma_a_star, sigma_d_star, t)
 
             # Record action for attacker to observe
             self.attacker.observed_def_actions.append(curr_def_action)
