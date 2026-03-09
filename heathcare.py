@@ -773,26 +773,26 @@ class HypergameModel:
 
     def information_advantage(self, P_true_a, P_true_d):
 
-    def kl_discrete(p, q, n_bins=N_BINS):
-        all_vals = np.concatenate([p, q])
-        vmin, vmax = all_vals.min(), all_vals.max()
-        if vmax - vmin < 1e-12:
-            return 0.0
-        bins = np.linspace(vmin, vmax, n_bins + 1)
-        hp, _ = np.histogram(p, bins=bins, density=False)   # FIX 2: density=False
-        hq, _ = np.histogram(q, bins=bins, density=False)
-        hp = (hp + 1e-12) / (hp.sum() + 1e-12 * n_bins)    # PMF, not PDF
-        hq = (hq + 1e-12) / (hq.sum() + 1e-12 * n_bins)
-        return float(np.sum(rel_entr(hp, hq)))
+        def kl_discrete(p, q, n_bins=N_BINS):
+            all_vals = np.concatenate([p, q])
+            vmin, vmax = all_vals.min(), all_vals.max()
+            if vmax - vmin < 1e-12:
+                return 0.0
+            bins = np.linspace(vmin, vmax, n_bins + 1)
+            hp, _ = np.histogram(p, bins=bins, density=False)   # FIX 2: density=False
+            hq, _ = np.histogram(q, bins=bins, density=False)
+            hp = (hp + 1e-12) / (hp.sum() + 1e-12 * n_bins)    # PMF, not PDF
+            hq = (hq + 1e-12) / (hq.sum() + 1e-12 * n_bins)
+            return float(np.sum(rel_entr(hp, hq)))
 
-    # FIX 1: normalize to proper distributions, as required by paper equation
-    pd = self.P_d.p_attack
-    pa = self.P_a.l2_belief_about_opponent_l1
+        # FIX 1: normalize to proper distributions, as required by paper equation
+        pd = self.P_d.p_attack
+        pa = self.P_a.l2_belief_about_opponent_l1
 
-    pd_norm = pd / (pd.sum() + 1e-12)
-    pa_norm = pa / (pa.sum() + 1e-12)
+        pd_norm = pd / (pd.sum() + 1e-12)
+        pa_norm = pa / (pa.sum() + 1e-12)
 
-    return kl_discrete(pd_norm, P_true_a) - kl_discrete(pa_norm, P_true_d)
+        return kl_discrete(pd_norm, P_true_a) - kl_discrete(pa_norm, P_true_d)
 
     def perception_gap(self, s_true: np.ndarray,
                        s_perceived: np.ndarray) -> float:
@@ -2698,7 +2698,10 @@ class HospitalHypergameSimulation:
                 atk_outcome = apply_attack_to_physical_state(
                     self.phys, targets, delta_mat,
                     self.attacker.active_attack_type,
-                    effectiveness_vec, self.rng)
+                    effectiveness_vec, self.rng
+                    obs_matrix=obs_matrix,
+                    particle_filters=self.defender.particle_filters,
+                    lambda_val=getattr(self, '_last_info_adv', 0.0))
                 n_suc = atk_outcome['n_successful']
                 n_det = atk_outcome['n_detected']
                 n_atk = atk_outcome['n_targets']
@@ -2782,6 +2785,7 @@ class HospitalHypergameSimulation:
             info_adv = self.hypergame.information_advantage(
                 P_true_a,
                 P_true_d)
+            self._last_info_adv = info_adv  # store for attack outcome model
 
             # Perception gap ΔP(t) (Eq.35)
             s_true = self.phys.get_sensor_matrix().mean(axis=0)
