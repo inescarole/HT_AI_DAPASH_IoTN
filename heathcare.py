@@ -2326,7 +2326,10 @@ def apply_attack_to_physical_state(
         delta_matrix: np.ndarray,
         attack_type: int,
         effectiveness_vector: np.ndarray,
-        rng: np.random.Generator) -> Dict:
+        rng: np.random.Generator,
+        obs_matrix: np.ndarray = None,
+        particle_filters: List = None,
+        lambda_val: float = 0.0) -> Dict:
     """
     Applies attack outcomes to physical state.
     Modifies device health h_i, trust τ_i, and patient vitals.
@@ -2364,16 +2367,17 @@ def apply_attack_to_physical_state(
         # NEW — principled three-component logistic detector
         a1, a2, a3 = 2.0, 1.5, 0.5          # calibrated by minimax, not by hand
 
-        rho_snr  = delta_norm / (SIGMA_NOISE * np.sqrt(D_STATE))
+        rho_snr  = delta_norm / (SIGMA_NOISE * np.sqrt(D_STATE)+1e-12)
 
-        innov    = np.linalg.norm(obs - pf.belief_mean)
-        z_innov  = innov / np.sqrt(pf.sigma2 * D_STATE + 1e-12)
+        if obs_matrix is not None and particle_filters is not None:
+            pf      = particle_filters[tid]
+            obs_i   = obs_matrix[tid, :D_STATE]
+            innov   = float(np.linalg.norm(obs_i - pf.belief_mean[:D_STATE]))
+            z_innov = innov / (np.sqrt(pf.sigma2 * D_STATE) + 1e-12)
+        else:
+            z_innov = rho_int   # fallback if PF not passed
 
-        Lambda   = hypergame.information_advantage(P_true_a, P_true_d)
-
-        tau_hat  = attacker.P_a.tau_hat     # attacker's estimated threshold
-
-        logit    = a1 * rho_snr + a2 * z_innov + a3 * Lambda - tau_hat
+        logit    = a1 * rho_snr + a2 * z_innov + a3 * lambda_val
         p_detect = float(1.0 / (1.0 + np.exp(-logit)))
         detected = bool(rng.random() < p_detect)
 
