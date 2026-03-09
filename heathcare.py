@@ -771,32 +771,28 @@ class HypergameModel:
             new_val = np.clip(P_i + dt * dP_dt, 0.0, 1.0)
             P_state.tau_hat = float(new_val.ravel()[0])
 
-    def information_advantage(self, P_true_a: np.ndarray,
-                               P_true_d: np.ndarray) -> float:
-        """
-        Λ = I(P^d_t; P^a_t)
-          = I(P^d_t; P^a_true) − I(P^a_t; P^d_true)   Eq.27
-        where I(P^d; P^a_true) = Σ_p P^d_t(p) log [P^d_t(p) / P^a_true(p)]
-        """
-        def kl_discrete(p, q, n_bins=N_BINS):
-            # Discretise via histogram
-            all_vals = np.concatenate([p, q])
-            vmin, vmax = all_vals.min(), all_vals.max()
-            if vmax - vmin < 1e-12:
-                return 0.0
-            bins = np.linspace(vmin, vmax, n_bins + 1)
-            hp, _ = np.histogram(p, bins=bins, density=True)
-            hq, _ = np.histogram(q, bins=bins, density=True)
-            hp = hp / (hp.sum() + 1e-12)
-            hq = hq / (hq.sum() + 1e-12)
-            return float(np.sum(rel_entr(hp + 1e-12, hq + 1e-12)))
+    def information_advantage(self, P_true_a, P_true_d):
 
-        pd_belief = self.P_d.p_attack
-        pa_belief = self.P_a.l2_belief_about_opponent_l1
+    def kl_discrete(p, q, n_bins=N_BINS):
+        all_vals = np.concatenate([p, q])
+        vmin, vmax = all_vals.min(), all_vals.max()
+        if vmax - vmin < 1e-12:
+            return 0.0
+        bins = np.linspace(vmin, vmax, n_bins + 1)
+        hp, _ = np.histogram(p, bins=bins, density=False)   # FIX 2: density=False
+        hq, _ = np.histogram(q, bins=bins, density=False)
+        hp = (hp + 1e-12) / (hp.sum() + 1e-12 * n_bins)    # PMF, not PDF
+        hq = (hq + 1e-12) / (hq.sum() + 1e-12 * n_bins)
+        return float(np.sum(rel_entr(hp, hq)))
 
-        I_d_given_a_true = kl_discrete(pd_belief, P_true_a)
-        I_a_given_d_true = kl_discrete(pa_belief, P_true_d)
-        return I_d_given_a_true - I_a_given_d_true    # Eq.27
+    # FIX 1: normalize to proper distributions, as required by paper equation
+    pd = self.P_d.p_attack
+    pa = self.P_a.l2_belief_about_opponent_l1
+
+    pd_norm = pd / (pd.sum() + 1e-12)
+    pa_norm = pa / (pa.sum() + 1e-12)
+
+    return kl_discrete(pd_norm, P_true_a) - kl_discrete(pa_norm, P_true_d)
 
     def perception_gap(self, s_true: np.ndarray,
                        s_perceived: np.ndarray) -> float:
@@ -2054,13 +2050,12 @@ class AttackerAgent:
                 aware_signal = float(d_act in (DEF_ISOLATION, DEF_DECEPTION,
                                                DEF_FIREWALL, DEF_HONEYPOT))
                 self.P_a.l2_belief_about_opponent_l1[i] = (
-                    0.9 * self.P_a.l2_belief_about_opponent_l1[i]
-                    + 0.1 * aware_signal)
+                    0.7 * self.P_a.l2_belief_about_opponent_l1[i]
+                    + 0.3 * aware_signal)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 11.  DEFENDER AGENT  (Sec. VI-C, hospital Sec. 3.1, 3.3)
-# ══════════════════════════════════════════════════════════════════════════════
-
+# ════════════════════════════════════
 class DefenderAgent:
     """
     Hospital cybersecurity defender with hypergame-aware AI.
