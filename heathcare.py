@@ -37,6 +37,7 @@ Reasoning levels k=0,1,2 for both players.
 # IMPORTS
 # ──────────────────────────────────────────────────────────────────────────────
 import numpy as np
+import pandas as pd
 import scipy.stats as stats
 from scipy.special import rel_entr          # KL divergence element-wise
 from scipy.spatial.distance import jensenshannon
@@ -63,10 +64,10 @@ warnings.filterwarnings('ignore')
 # ──────────────────────────────────────────────────────────────────────────────
 
 # --- Hospital topology ---
-N_MONITORS   = 100          # bedside monitors
-N_PUMPS      = 30           # infusion pumps
-N_VENTS      = 20           # ventilators
-N_WEARABLES  = 200          # wearable sensors
+N_MONITORS   = 100          #100 bedside monitors
+N_PUMPS      = 30           # 30 infusion pumps
+N_VENTS      = 20          # 20 ventilators
+N_WEARABLES  = 200          # 200 wearable sensors
 N_DEVICES    = N_MONITORS + N_PUMPS + N_VENTS + N_WEARABLES   # 350
 N_PATIENTS   = 50
 
@@ -82,7 +83,7 @@ NS           = 5            # physical sensor readings per device
 # --- Attack/defense parameters (paper Sec. VI-B,C,E) ---
 EPSILON_PERT = 0.15         # ℓ2-norm perturbation budget  (Eq.30,38)
 SIGMA_NOISE  = 0.05         # Gaussian sensor noise σ       (Eq.33)
-P_EDGE       = 0.3          # Erdős–Rényi edge probability  (Eq.28)
+P_EDGE       = 0.1          # Erdős–Rényi edge probability  (Eq.28)
 P_BASE_ATK   = 0.3          # base attack success prob      (Eq.38)
 LAMBDA_C     = 0.1          # multi-target cost penalty     (Eq.31)
 KAPPA        = 0.9          # health degradation multiplier (Sec. VI-E3)
@@ -92,7 +93,7 @@ TRUST_LOW    = 0.4          # low-trust threshold           (Sec. VI-B3)
 HEALTH_LOW   = 0.7          # low-health threshold          (Sec. VI-B3)
 
 # --- Particle filter (paper Sec. VI-C2) ---
-N_PARTICLES  = 200          # number of particles in belief representation
+N_PARTICLES  = 100          # 200 number of particles in belief representation
 N_EFF_MIN    = 0.2 * N_PARTICLES        # = 200
 
 # --- Learning parameters (paper Sec. VI-E1) ---
@@ -114,12 +115,13 @@ K_ATTACKER   = 2
 EPS_CONV     = 1e-3         # Nash iteration convergence (Eq.37)
 
 # --- Simulation config ---
-N_EPISODES   = 100
+N_EPISODES   = 50
 T_STEPS      = 200
 N_SEEDS      = 50
 BASE_SEED    = 42
-N_BINS       = 30           # discretisation bins for KL (Sec. VI-D2)
-K_ADV_STEPS  = 15           # adversarial training steps per episode
+N_BINS       = 15           # discretisation bins for KL (Sec. VI-D2)
+#K_ADV_STEPS  = 15
+K_ADV_STEPS  = 5           # 15 adversarial training steps per episode
 
 # --- Attack type indices ---
 ATK_SPOOFING = 0            # A1
@@ -773,26 +775,21 @@ class HypergameModel:
 
     def information_advantage(self, P_true_a, P_true_d):
 
-        def kl_discrete(p, q, n_bins=N_BINS):
-            all_vals = np.concatenate([p, q])
-            vmin, vmax = all_vals.min(), all_vals.max()
-            if vmax - vmin < 1e-12:
-                return 0.0
-            bins = np.linspace(vmin, vmax, n_bins + 1)
-            hp, _ = np.histogram(p, bins=bins, density=False)   # FIX 2: density=False
-            hq, _ = np.histogram(q, bins=bins, density=False)
-            hp = (hp + 1e-12) / (hp.sum() + 1e-12 * n_bins)    # PMF, not PDF
-            hq = (hq + 1e-12) / (hq.sum() + 1e-12 * n_bins)
-            return float(np.sum(rel_entr(hp, hq)))
+        def kl_direct(p, q):
+            # Laplace smoothing so KL is finite even with zero-support devices
+            p = np.asarray(p, dtype=float)
+            q = np.asarray(q, dtype=float)
+            p = (p + 1e-9) / (p.sum() + 1e-9 * len(p))
+            q = (q + 1e-9) / (q.sum() + 1e-9 * len(q))
+            return float(np.sum(rel_entr(p, q)))
 
-        # FIX 1: normalize to proper distributions, as required by paper equation
         pd = self.P_d.p_attack
         pa = self.P_a.l2_belief_about_opponent_l1
+        pd_norm = (pd + 1e-9) / (pd.sum() + 1e-9 * len(pd))
+        pa_norm = (pa + 1e-9) / (pa.sum() + 1e-9 * len(pa))
 
-        pd_norm = pd / (pd.sum() + 1e-12)
-        pa_norm = pa / (pa.sum() + 1e-12)
-
-        return kl_discrete(pd_norm, P_true_a) - kl_discrete(pa_norm, P_true_d)
+    # Λ > 0 = defender advantage (attacker more confused than defender)
+        return kl_direct(pa_norm, P_true_d) - kl_direct(pd_norm, P_true_a)
 
     def perception_gap(self, s_true: np.ndarray,
                        s_perceived: np.ndarray) -> float:
@@ -1177,7 +1174,7 @@ def iterated_best_response(sigma_d: np.ndarray,
                             health_vector: np.ndarray,
                             k_d: int = K_DEFENDER,
                             k_a: int = K_ATTACKER,
-                            max_iter: int = 50,
+                            max_iter: int = 15,
                             eps: float = EPS_CONV) -> Tuple[np.ndarray, np.ndarray, int]:
     """
     Iterated best response to find hypergame Nash equilibrium (HNE).
@@ -1609,14 +1606,33 @@ class DeceptionAwareParticleFilter:
                                                      self.delta_particles.shape)
 
         # --- 4. Weight update: P(o^D_{t+1}|s',δ') ---
-        new_weights = np.zeros(self.N)
-        for i in range(self.N):
-            new_weights[i] = (self.weights[i] *
-                               self.observation_likelihood(
-                                   obs_d,
-                                   self.s_particles[i],
-                                   self.delta_particles[i],
-                                   self.sigma2_adaptive))
+        #new_weights = np.zeros(self.N)
+        #for i in range(self.N):
+         #   new_weights[i] = (self.weights[i] *
+          #                     self.observation_likelihood(
+           #                        obs_d,
+            #                       self.s_particles[i],
+             #                      self.delta_particles[i],
+              #                     self.sigma2_adaptive))
+        dim = min(len(obs_d), self.d)
+        obs_trunc  = obs_d[:dim]
+        s_trunc    = self.s_particles[:, :dim]      # (N, dim)
+        d_trunc    = self.delta_particles[:, :dim]  # (N, dim)
+        predicted  = s_trunc + d_trunc              # (N, dim)
+        residuals  = obs_trunc[np.newaxis, :] - predicted  # (N, dim)
+        log_liks   = -0.5 * np.sum(residuals**2, axis=1) / self.sigma2_adaptive
+        log_liks  -= log_liks.max()                # numerical stability
+        liks       = np.exp(log_liks)
+        new_weights = self.weights * liks
+        w_sum = new_weights.sum()
+        if w_sum < 1e-300:
+            new_weights = np.ones(self.N) / self.N
+        else:
+            new_weights /= w_sum
+        self.weights = new_weights
+
+
+
         # Normalise
         w_sum = new_weights.sum()
         if w_sum < 1e-300:
@@ -1677,9 +1693,10 @@ class DeceptionAwareParticleFilter:
         # Observation-guided proposals (Sec.VI-C2, bullet 4):
         # Move 10% of particles toward the current observation mean
         n_guided = max(1, int(0.1 * self.N))
-        for i in range(n_guided):
-            self.s_particles[i] = (self.belief_mean +
-                                    self.rng.normal(0, 0.01, self.d))
+        self.s_particles[:n_guided] = (
+            self.belief_mean +
+            self.rng.normal(0, 0.01, (n_guided, self.d))
+        )
 
     def pomdp_value(self,
                      belief: np.ndarray,
@@ -1825,21 +1842,21 @@ class AttackerAgent:
         high_conn = set(self.topology.get_high_connectivity_targets())
         gateways  = set(self.topology.get_gateway_devices())
 
-        for i in range(self.n):
-            # Attacker utility: higher for low-trust, low-health, high-conn
-            u_target = (1.0 - trust_vector[i]) * 0.4
-            u_target += (1.0 - health_vector[i]) * 0.3
-            u_target += (0.3 if i in high_conn else 0.0)
-            u_target += (0.4 if i in gateways else 0.0)
+        high_conn = set(self.topology.get_high_connectivity_targets())
+        gateways  = set(self.topology.get_gateway_devices())
 
-            # Criticality by device type
-            dtype = self.topology.device_types[i]
-            u_target *= DEV_CRITICALITY[dtype]
+        conn_bonus    = np.array([0.3 if i in high_conn else 0.0
+                                   for i in range(self.n)])
+        gateway_bonus = np.array([0.4 if i in gateways  else 0.0
+                                   for i in range(self.n)])
+        criticality   = np.array([DEV_CRITICALITY[self.topology.device_types[i]]
+                                   for i in range(self.n)])
 
-            # Account for τ̂: avoid devices where detection likely
-            u_target *= (1.0 - self.tau_hat * 0.5)
-
-            scores[i] = u_target
+        scores = (
+            (1.0 - trust_vector)  * 0.4 +
+            (1.0 - health_vector) * 0.3 +
+            conn_bonus + gateway_bonus
+        ) * criticality * (1.0 - self.tau_hat * 0.5)
 
         # Budget constraint: select top-n_targets devices
         n_targets = max(1, int(self.n * 0.05))     # ~5% of devices
@@ -1887,8 +1904,12 @@ class AttackerAgent:
                 if dtype in (DEV_MONITOR, DEV_WEARABLE):
                     # Shift HR downward (simulate bradycardia) → triggers
                     # incorrect clinical response
-                    hr_shift = -float(self.rng.uniform(10, 25))
-                    spo2_shift = -float(self.rng.uniform(3, 8))
+                    hr_margin  = pat.HR - PHYSIO_RANGES['HR'][0]        # distance to low bound
+                    spo2_margin = pat.SpO2 - PHYSIO_RANGES['SpO2'][0]   # distance to low bound
+
+                    # Shift by half the margin — maximally stealthy, still crosses threshold
+                    hr_shift   = -float(np.clip(hr_margin * 0.5,  5, 25))
+                    spo2_shift = -float(np.clip(spo2_margin * 0.5, 2, 8))
                     # Embed in sensor dimensions of state vector
                     base_delta[0] = hr_shift / PHYSIO_STD['HR']
                     base_delta[2] = spo2_shift / PHYSIO_STD['SpO2']
@@ -2134,8 +2155,11 @@ class DefenderAgent:
         """
         pat = physical_state.patients[patient_id]
         normals = np.array([
-            PHYSIO_NORMAL['HR'], PHYSIO_NORMAL['SBP'],
-            PHYSIO_NORMAL['SpO2'], PHYSIO_NORMAL['RR'], PHYSIO_NORMAL['Temp']
+            pat.HR,
+            pat.SBP,
+            pat.SpO2,
+                pat.RR,
+                pat.Temp
         ])
         stds = np.array([
             PHYSIO_STD['HR'], PHYSIO_STD['SBP'],
@@ -2218,38 +2242,61 @@ class DefenderAgent:
                         hypergame: HypergameModel,
                         attacker_strategy: np.ndarray,
                         sigma_d_star: np.ndarray,
-                        time_step: int) -> np.ndarray:
+                        time_step,
+                        device_states: np.ndarray = None) -> np.ndarray:
         """
         Computes defender's k=2 best response and selects per-device actions.
         Policy π*_D: S × B → Δ(D)  (Eq.34)
         """
         # Compute k=2 best response
-        br_sigma = sigma_d_star
+        # Compute k=2 best response — pass real device states (fix dead-code branch)
+        device_states = np.array([d.s for d in self.phys.devices
+                                   ]) if hasattr(self, 'phys') else \
+                        np.zeros((self.n, D_STATE))
+        br_sigma = best_response_levelk(
+            'defender',
+            attacker_strategy,
+            hypergame.P_a,
+            hypergame.P_d,
+            device_states,
+            health_vector,
+            self.P_d, hypergame.P_a,
+            k=K_DEFENDER)
 
-        # Map strategy distribution to per-device actions
-        # Higher attack probability → more aggressive defence
-        actions = np.full(self.n, DEF_MONITOR)
+        # Resolve br_sigma → dominant DEF action index (indices 7-9 are k=2)
+        dominant_strategy_name = StrategySpace.DEF_ALL[int(np.argmax(br_sigma))]
+        br_def_action = StrategySpace.STRATEGY_TO_DEF_IDX.get(
+            dominant_strategy_name, DEF_MONITOR)
+
+        # Network-level threat signal
         mean_atk_prob = belief_update['mean_attack_prob']
 
+        actions = np.full(self.n, DEF_MONITOR)
         for i in range(self.n):
             p_atk_est_i = float(belief_update['pf_results'][i]['p_attack_est'])
 
-            # π*(b_i) = argmax_a Q(b_i, a)   (Eq.34)
+            # Q-value from particle filter (reactive, per-device)
             q_vals = np.array([
                 self.particle_filters[i].q_value(
                     a, health_vector[i], p_atk_est_i)
                 for a in range(N_DEF_ACTIONS)
             ])
-            actions[i] = int(np.argmax(q_vals))
+            pf_action = int(np.argmax(q_vals))
 
-            # Level 1 strategy override: ThresholdDither every 20 steps
-            if time_step % 20 == 0:
-                l1_strats = self.strategy_space.level_strategies(1)
-                if 'ThresholdDither' in l1_strats:
-                    for k_sensor in ['HR', 'SpO2']:
-                        offset = self.rng.uniform(-5, 5)
-                        self.cdss_thresholds[k_sensor]['high'] += offset
-                    #    self.cdss_thresholds[k_sensor]['low']  += offset
+            # π*(b_i): hypergame BR overrides PF when attack is suspected
+            # Uses both network-level (mean_atk_prob) and per-device signals
+            if mean_atk_prob > 0.3 or p_atk_est_i > 0.4:
+                actions[i] = br_def_action   # k=2 hypergame best response
+            else:
+                actions[i] = pf_action       # PF greedy (no threat detected)
+
+        # ThresholdDither override at level-1 (once per 20 steps, not twice)
+        if time_step % 20 == 0:
+            l1_strats = self.strategy_space.level_strategies(1)
+            if 'ThresholdDither' in l1_strats:
+                for k_sensor in ['HR', 'SpO2']:
+                    offset = self.rng.uniform(-5, 5)
+                    self.cdss_thresholds[k_sensor]['high'] += offset
 
         self.active_defenses = actions
         return actions
@@ -2373,7 +2420,7 @@ def apply_attack_to_physical_state(
             pf      = particle_filters[tid]
             obs_i   = obs_matrix[tid, :D_STATE]
             innov   = float(np.linalg.norm(obs_i - pf.belief_mean[:D_STATE]))
-            z_innov = innov / (np.sqrt(pf.sigma2 * D_STATE) + 1e-12)
+            z_innov = innov / (np.sqrt(pf.sigma2_adaptive * D_STATE) + 1e-12)
         else:
             z_innov = rho_int   # fallback if PF not passed
 
@@ -2393,10 +2440,11 @@ def apply_attack_to_physical_state(
             # Affect patient vitals if device is patient-linked
             if pid >= 0 and dtype in (DEV_MONITOR, DEV_WEARABLE, DEV_PUMP, DEV_VENT):
                 pat = physical_state.patients[pid]
+                severity = DEV_CRITICALITY[dtype] * delta_norm
                 if dtype in (DEV_MONITOR, DEV_WEARABLE):
                     # Device now reports corrupted vitals — actual physiological
                     # harm from delayed treatment (attacker goal achieved)
-                    severity = DEV_CRITICALITY[dtype] * delta_norm
+                    #severity = DEV_CRITICALITY[dtype] * delta_norm
                     pat.SpO2 = float(np.clip(pat.SpO2 - severity * 2, 70, 100))
                 elif dtype == DEV_PUMP:
                     # Infusion rate manipulation → patient harm
@@ -2611,7 +2659,7 @@ class HospitalHypergameSimulation:
             self.phys.step_dynamics()
             health_vec = np.array([d.health for d in self.phys.devices])
             trust_vec  = np.array([d.trust  for d in self.phys.devices])
-            H_t = self.phys.network_health()   # Eq.29
+            #H_t = self.phys.network_health()   # Eq.29
 
             # ─────────────────────────────────────────────────────────────────
             # STEP 2: Attacker acts
@@ -2677,9 +2725,10 @@ class HospitalHypergameSimulation:
             # ─────────────────────────────────────────────────────────────────
             # STEP 6: Defender selects action (k=2 best response, Eq.9)
             # ─────────────────────────────────────────────────────────────────
+            dev_states = np.array([d.s for d in self.phys.devices])
             def_actions = self.defender.select_defense(
                 belief_update, health_vec, trust_vec,
-                self.hypergame, sigma_a_star, sigma_d_star, t)
+                self.hypergame, sigma_a_star, sigma_d_star, t, device_states=dev_states)
 
             # Record action for attacker to observe
             self.attacker.observed_def_actions.append(curr_def_action)
@@ -2698,7 +2747,7 @@ class HospitalHypergameSimulation:
                 atk_outcome = apply_attack_to_physical_state(
                     self.phys, targets, delta_mat,
                     self.attacker.active_attack_type,
-                    effectiveness_vec, self.rng
+                    effectiveness_vec, self.rng,
                     obs_matrix=obs_matrix,
                     particle_filters=self.defender.particle_filters,
                     lambda_val=getattr(self, '_last_info_adv', 0.0))
@@ -2766,21 +2815,22 @@ class HospitalHypergameSimulation:
             # ── P^A_true: attacker's true perception ──────────────────────────
             # The attacker truly knows its own perturbation magnitudes per device.
             # P^A_true[i] = ||δ_i||₂ / Σ_j ||δ_j||₂  — concentration of attack effort
-            P_true_a = np.linalg.norm(delta_mat, axis=1)   # (N_DEVICES,)
-            if P_true_a.sum() > 1e-12:
-                P_true_a = P_true_a / P_true_a.sum()
-            else:
-                P_true_a = np.ones(N_DEVICES) / N_DEVICES   # no attack → max uncertainty
+            #P_true_a = np.linalg.norm(delta_mat, axis=1)
+            P_true_a_raw = np.linalg.norm(delta_mat, axis=1)# (N_DEVICES,)
+            #if P_true_a_raw.sum() > 1e-12:
+            P_true_a = (P_true_a_raw + 1e-6) / (P_true_a_raw.sum() + 1e-6 * N_DEVICES)
+            #else:
+            #P_true_a = np.ones(N_DEVICES) / N_DEVICES   # no attack → max uncertainty
 
             # ── P^D_true: defender's true perception ──────────────────────────
             # The defender's ground truth = actual health damage incurred per device.
             # (1 - health_vec_post) captures which devices are truly compromised,
             # independent of the defender's filtered belief.
-            P_true_d = 1.0 - health_vec_post                # (N_DEVICES,)
-            if P_true_d.sum() > 1e-12:
-                P_true_d = P_true_d / P_true_d.sum()
-            else:
-                P_true_d = np.ones(N_DEVICES) / N_DEVICES   # all healthy → max uncertainty
+            P_true_d_raw = 1.0 - health_vec_post                # (N_DEVICES,)
+            #if P_true_d_raw.sum() > 1e-12:
+            P_true_d = (P_true_d_raw + 1e-6) / (P_true_d_raw.sum() + 1e-6 * N_DEVICES)
+            #else:
+            #P_true_d = np.ones(N_DEVICES) / N_DEVICES   # all healthy → max uncertainty
 
             info_adv = self.hypergame.information_advantage(
                 P_true_a,
@@ -3080,6 +3130,13 @@ def generate_figures(sim_results: List[MetricsCollector],
     eps_curve = [convergence_bound(k) for k in k_vals]
     ax.semilogy(k_vals, eps_curve, 'r-o', lw=2, ms=6,
                 label=r'$\epsilon(k) = C\rho^k$ (Prop.1)')
+    if all_eps.size > 0:
+    # all_eps shape: (n_episodes, T_STEPS)
+    # take mean over time per episode, then mean over episodes
+        emp_mean = all_eps.mean()   # scalar — overall mean
+    # plot as horizontal reference line
+        ax.axhline(emp_mean, color='blue', linestyle='--', lw=1.5,
+               label=f'Empirical $\\bar{{\\epsilon}}(k)$ = {emp_mean:.4f}')
     ax.set_xlabel('Reasoning Level k')
     ax.set_ylabel('Approximation Error ε(k)')
     ax.set_title('(e) Convergence Bound (Theorem 1)')
@@ -3159,8 +3216,12 @@ def generate_figures(sim_results: List[MetricsCollector],
         plt.savefig(fig_path3, bbox_inches='tight')
         plt.close()
         print(f"  Saved: {fig_path3}")
+        paths = [fig_path1, fig_path2]
+        if multi_seed_stats:
+            paths.append(fig_path3)
+        return paths
 
-    return [fig_path1, fig_path2]
+   # return [fig_path1, fig_path2]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3218,6 +3279,7 @@ def main(full_multiseed: bool = False):
     print("  Generating Publication Figures...")
     print(f"{'='*70}")
     fig_paths = generate_figures(all_sim_results, multi_stats)
+    print(f"  Figures saved: {', '.join(fig_paths)}")
 
     # Save JSON summary
     json_path = '/mnt/user-data/outputs/simulation_results.json'
@@ -3286,4 +3348,4 @@ def main(full_multiseed: bool = False):
 
 if __name__ == '__main__':
     # Run with 3 seeds for validation; change to full_multiseed=True for paper
-    results, sims = main(full_multiseed=False)
+    results, sims = main(full_multiseed=True)
