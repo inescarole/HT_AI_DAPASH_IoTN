@@ -1353,6 +1353,17 @@ class AdversarialMetaLearner:
         self.P_A_hist = np.ones(N_BINS) / N_BINS
         self.P_A_true = np.ones(N_BINS) / N_BINS
 
+        # History lists for metrics
+        self.loss_precision_history = []
+        self.loss_kl_history = []
+        self.loss_primary_history = []
+        self.total_loss_history = []
+        self.kl_divergence_history = []
+        self.kl_precision_history = []
+        self.grad_norm_precision_history = []
+        self.grad_norm_kl_history = []
+        self.grad_norm_primary_history = []
+
     def forward(self, x: np.ndarray) -> np.ndarray:
         """MLP forward pass: x → logits."""
         h = np.maximum(0, self.W1 @ x + self.b1)  # ReLU
@@ -1505,9 +1516,23 @@ class AdversarialMetaLearner:
         R_sigma = self.strategy_regulariser(sigma_d, sigma_a)
 
         # Total gradient (scalar KL term added to all weights uniformly)
-        total_loss_scalar = (self.cross_entropy_loss(x_adv, y)
-                             + lambda_w * kl_term
-                             + mu_w * R_sigma)
+        loss_primary = self.cross_entropy_loss(x_adv, y)
+        loss_kl = lambda_w * kl_term
+        loss_precision = mu_w * R_sigma
+        total_loss_scalar = loss_primary + loss_kl + loss_precision
+
+        
+        # Append to histories
+        self.loss_primary_history.append(loss_primary)
+        self.loss_kl_history.append(loss_kl)
+        self.loss_precision_history.append(loss_precision)
+        self.total_loss_history.append(total_loss_scalar)
+        self.kl_divergence_history.append(kl_term)
+        self.kl_precision_history.append(0.0)  # Placeholder, as not computed
+        self.grad_norm_primary_history.append(np.linalg.norm(grads['W1']) + np.linalg.norm(grads['W2']))  # Example norm
+        self.grad_norm_kl_history.append(0.0)  # Placeholder
+        self.grad_norm_precision_history.append(0.0)  # Placeholder
+
 
         # Adam update for each parameter group
         for (W, dW, mW, vW, mb, vb, db, b) in [
@@ -1667,8 +1692,8 @@ class DeceptionAwareParticleFilter:
           #                     self.observation_likelihood(
            #                        obs_d,
             #                       self.s_particles[i],
-             #                      self.delta_particles[i],
-              #                     self.sigma2_adaptive))
+            #                      self.delta_particles[i],
+            #                     self.sigma2_adaptive))
         dim = min(len(obs_d), self.d)
         obs_trunc  = obs_d[:dim]
         s_trunc    = self.s_particles[:, :dim]      # (N, dim)
@@ -2154,7 +2179,8 @@ class AttackerAgent:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 11.  DEFENDER AGENT  (Sec. VI-C, hospital Sec. 3.1, 3.3)
-# ════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+
 class DefenderAgent:
     """
     Hospital cybersecurity defender with hypergame-aware AI.
@@ -2275,7 +2301,7 @@ class DefenderAgent:
         for i in range(self.n):
             # CDSS anomaly score for patient-linked devices
             pid = self.topology.patient_map.get(i, -1)
-            if pid >= 0 and self.topology.device_types[i] in (DEV_MONITOR, DEV_WEARABLE):
+            if pid >= 0 and self.topology.device_types[i] in (DEV_MONITOR, DEV_WEARABLE, DEV_PUMP, DEV_VENT):
                 sensor_obs = physical_state.devices[i].r + delta_matrix[i, :NS] + xi_mat[i, :NS]
                 anomaly_scores[i] = self.cdss_anomaly_score(pid, sensor_obs, physical_state)
             else:
@@ -2524,7 +2550,16 @@ def apply_attack_to_physical_state(
         a3       = float(np.clip(mean_p_attack, 0.0, 1.0))  # attack prior
 
         rho_snr  = delta_norm / (SIGMA_NOISE * np.sqrt(d_eff) + 1e-12)
-        logit    = a1 * rho_snr + a2 * z_innov + a3 * lambda_val
+        #logit    = a1 * rho_snr + a2 * z_innov + a3 * lambda_val
+        # NP detection signal (unchanged core)
+        np_signal = a1 * rho_snr + a2 * z_innov
+
+        # Exponential amplifier (information advantage)
+        beta = 1.0  # interpretable gain parameter
+        amp  = np.exp(beta * lambda_val)
+
+        # Final logit (multiplicative coupling)
+        logit = np_signal * amp
         p_detect = float(1.0 / (1.0 + np.exp(-logit)))
         detected = bool(rng.random() < p_detect)
 
@@ -2599,16 +2634,16 @@ class MetricsCollector:
         self.strategy_entropy_d: List[float] = []
         self.strategy_entropy_a: List[float] = []
         self.n_eff_history: List[float] = []
-        self.loss_precision_history = []
-        self.loss_kl_history = []
-        self.loss_primary_history = []
-        self.total_loss_history = []
-        self.kl_divergence_history = []
-        self.kl_precision_history = []
-        self.grad_norm_history = []
-        self.grad_norm_primary_history= []
-        self.grad_norm_kl_history = []
-        self.grad_norm_precision_history = []
+        self.loss_precision_history: List[float] = []
+        self.loss_kl_history: List[float] = []
+        self.loss_primary_history: List[float] = []
+        self.total_loss_history: List[float] = []
+        self.kl_divergence_history: List[float] = []
+        self.kl_precision_history: List[float] = []
+        self.gradient_norm_history: List[float] = []
+        self.grad_norm_precision_history: List[float] = []
+        self.grad_norm_kl_history: List[float] = []
+        self.grad_norm_primary_history: List[float] = []
 
     def record_timestep(self,
                          health: float,
@@ -2625,7 +2660,16 @@ class MetricsCollector:
                          entropy_d: float,
                          entropy_a: float,
                          n_eff_mean: float,
-                         robustness: float):
+                         robustness: float,
+                         loss_precision: float = 0.0,
+                         loss_kl: float = 0.0,
+                         loss_primary: float = 0.0,
+                         total_loss: float = 0.0,
+                         kl_divergence: float = 0.0,
+                         kl_precision: float = 0.0,
+                         grad_norm_precision: float = 0.0,
+                         grad_norm_kl: float = 0.0,
+                         grad_norm_primary: float = 0.0):
         self.health_history.append(health)
         self.resilience_history.append(resilience)
         self.info_advantage_history.append(info_adv)
@@ -2641,16 +2685,15 @@ class MetricsCollector:
         self.strategy_entropy_a.append(entropy_a)
         self.n_eff_history.append(n_eff_mean)
         self.robustness_history.append(robustness)
-        self.loss_precision_history.append(0.0)  # Placeholder for actual loss values
-        self.loss_kl_history.append(0.0)
-        self.loss_primary_history.append(0.0)
-        self.total_loss_history.append(0.0)
-        self.kl_divergence_history.append(0.0)
-        self.kl_precision_history.append(0.0)
-        #self.gradient_norm_history.append(0.0)
-        self.grad_norm_precision_history.append(0.0)
-        self.grad_norm_kl_history.append(0.0)
-        self.grad_norm_primary_history.append(0.0)
+        self.loss_precision_history.append(loss_precision)
+        self.loss_kl_history.append(loss_kl)
+        self.loss_primary_history.append(loss_primary)
+        self.total_loss_history.append(total_loss)
+        self.kl_divergence_history.append(kl_divergence)
+        self.kl_precision_history.append(kl_precision)
+        self.grad_norm_precision_history.append(grad_norm_precision)
+        self.grad_norm_kl_history.append(grad_norm_kl)
+        self.grad_norm_primary_history.append(grad_norm_primary)
 
     @property
     def detection_rate(self) -> float:
