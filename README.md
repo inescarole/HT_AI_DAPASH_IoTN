@@ -13,7 +13,7 @@ This repository contains the full simulation code, raw data, and figure generati
 
 ```
 ├── Healthcare.py          # Full simulation (Eq. 1–39)
-├── raw_metrics.
+├── raw_metrics.npy
 ├── simulation_raw.npz         # Main results  — 2500 runs (50 seeds × 50 ep)
 └── README.md                      # This file
 ```
