@@ -53,11 +53,11 @@ Output: PNG figures in `/outputs/`
 | Reasoning depth $k$ | 2 | Both players |
 | Particles per device | 20–100 | Adaptive SIR filter |
 
-Full parameter tables are in [`supplementary_parameters.pdf`](supplementary_parameters.pdf).
+Full parameter tables are in [`supplementary_parameters.pdf`](Supplementary_parameters.pdf).
 
 ## Supplementary Material
 
-[`supplementary_parameters.pdf`](supplementary_parameters.pdf) contains tables covering all simulation parameters, patient physiological bounds, device criticality weights, particle filter settings, and meta-learner hyperparameters. 
+[`supplementary_parameters.pdf`](Supplementary_parameters.pdf) contains tables covering all simulation parameters, patient physiological bounds, device criticality weights, particle filter settings, and meta-learner hyperparameters. 
 
 ---
 
