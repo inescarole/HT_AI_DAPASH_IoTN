@@ -80,10 +80,10 @@ D_COMM       = 20           # d5 communication features
 NS           = 5            # physical sensor readings per device
 
 # --- Attack/defense parameters (paper Sec. VI-B,C,E) ---
-EPSILON_PERT = 0.15         # ℓ2-norm perturbation budget  (Eq.30,38)
-SIGMA_NOISE  = 0.05         # Gaussian sensor noise σ       (Eq.33)
+EPSILON_PERT = 0.15       # 0.15ℓ2-norm perturbation budget  (Eq.30,38)
+SIGMA_NOISE  = 0.05         #0.05Gaussian sensor noise σ       (Eq.33)
 P_EDGE       = 0.1          # Erdős–Rényi edge probability  (Eq.28)
-P_BASE_ATK   = 0.3          # base attack success prob      (Eq.38)
+P_BASE_ATK   = 0.3          # 0.3base attack success prob      (Eq.38)
 LAMBDA_C     = 0.1          # multi-target cost penalty     (Eq.31)
 KAPPA        = 0.9          # health degradation multiplier (Sec. VI-E3)
 ALPHA_DECAY  = 0.01         # trust decay rate              (Sec. VI-E3)
@@ -116,7 +116,7 @@ EPS_CONV     = 1e-3         # Nash iteration convergence (Eq.37)
 # --- Simulation config ---
 N_EPISODES   = 50
 T_STEPS      = 200
-N_SEEDS      = 10
+N_SEEDS      = 50
 BASE_SEED    = 42
 N_BINS       = 15           # discretisation bins for KL (Sec. VI-D2)
 #K_ADV_STEPS  = 15
@@ -146,8 +146,7 @@ DEF_ETA = np.array([1.0, 1.5, 1.5, 1.5, 1.5, 1.5, 1.0])
 DEF_COST = np.array([0.1, 0.5, 1.0, 0.8, 0.6, 1.2, 0.3])
 
 # Effectiveness matrix: DEF_EFF[action, attack_type]
-# Used by the ATTACKER to select the type that best exploits each defense.
-# The defender does NOT use this table — it is type-agnostic by design.
+# which defenses work against which attacks
 DEF_EFF = np.array([
     # A1    A2    A3    A4    A5
     [0.5,  0.3,  0.3,  0.3,  0.3],   # MONITOR (detects but doesn't stop)
@@ -158,12 +157,6 @@ DEF_EFF = np.array([
     [0.5,  0.5,  1.5,  0.5,  0.5],   # ISOLATION (vs poisoning)
     [1.0,  1.0,  1.0,  1.0,  1.0],   # ACCESS_CONTROL (general)
 ])
-
-# Type-agnostic effectiveness: DEF_EFF_BASE[action]
-# The DEFENDER uses this table — Bayesian average over all attack types.
-# Thesis: the defense responds to the perception gap itself, not its cause.
-# Each entry is E_type[η(action, type)] = mean effectiveness across all types.
-DEF_EFF_BASE: np.ndarray = DEF_EFF.mean(axis=1)   # shape (N_DEF_ACTIONS,)
 
 # Attack type multipliers µ_type ∈ [0.7, 1.2]  (Eq.38)
 ATK_MU = np.array([0.9, 1.2, 1.0, 0.8, 0.7])
@@ -924,10 +917,7 @@ def subjective_payoff(si: int, s_hat_j: int, player: str,
     if player == 'defender':
         # Map strategy index → Table-I defence action
         def_action = min(si, N_DEF_ACTIONS - 1)
-        # Type-agnostic: defender evaluates action by its average effectiveness
-        # against the perception gap, not by guessing the attack type.
-        # η̄(action) = E_type[η(action, type)]  (Eq. gap-agnostic extension)
-        eta_effective = DEF_EFF_BASE[def_action]
+        atk_belief = min(s_hat_j, N_ATK_TYPES - 1)
 
         # r_i(s_i): direct reward — saved patient health
         r = float(np.mean(health_vector) * DEF_ETA[def_action])
@@ -935,10 +925,12 @@ def subjective_payoff(si: int, s_hat_j: int, player: str,
         # c_i(s_i): deployment cost
         c = DEF_COST[def_action]
 
-        # v_i: strategic value — how well this action closes the perception gap
+        # v_i(s_i, ŝ^i_{-i}): strategic value if defence counters believed attack
+        eta_effective = DEF_EFF[def_action, atk_belief]
         v = eta_effective * float(np.mean(health_vector))
 
-        # l_i: residual risk if gap is not fully closed
+        # l_i(s_i, ŝ^i_{-i}): perceived risk if attack succeeds despite defence
+        # Risk is high if isolation disrupts critical devices
         isolation_risk = 0.3 if def_action == DEF_ISOLATION else 0.0
         l = max(0.0, (1.0 - eta_effective) * 0.5 + isolation_risk)
 
@@ -988,17 +980,14 @@ def expected_utility(sigma_i: np.ndarray,
 
     if player == 'defender':
         si_idx = np.clip(np.arange(ni), 0, N_DEF_ACTIONS - 1)
-        # Type-agnostic: effectiveness does not depend on opponent strategy index
-        # The payoff matrix is constant across sj — defender evaluates gap closure
-        eta  = DEF_EFF_BASE[si_idx]                                  # (ni,)
-        r    = mean_h * DEF_ETA[si_idx]                              # (ni,)
-        c    = DEF_COST[si_idx]                                       # (ni,)
-        v    = eta * mean_h                                           # (ni,)
-        iso  = (si_idx == DEF_ISOLATION).astype(float) * 0.3         # (ni,)
-        l    = np.maximum(0.0, (1.0 - eta) * 0.5 + iso)             # (ni,)
-        # payoff is independent of sj → broadcast to (ni, nj)
-        payoff_mat = ((r - c + v - l)[:, None]
-                      * np.ones(nj)[None, :])                        # (ni,nj)
+        sj_idx = np.clip(np.arange(nj), 0, N_ATK_TYPES - 1)
+        r   = mean_h * DEF_ETA[si_idx]                              # (ni,)
+        c   = DEF_COST[si_idx]                                       # (ni,)
+        eta = DEF_EFF[si_idx[:, None], sj_idx[None, :]]             # (ni,nj)
+        v   = eta * mean_h                                           # (ni,nj)
+        iso = (si_idx == DEF_ISOLATION).astype(float) * 0.3         # (ni,)
+        l   = np.maximum(0.0, (1.0 - eta) * 0.5 + iso[:, None])    # (ni,nj)
+        payoff_mat = (r - c)[:, None] + v - l                       # (ni,nj)
     else:  # attacker
         _atk_costs = np.array([0.0, 0.3, 0.5, 0.8, 0.4, 0.2])
         si_idx     = np.arange(ni)
@@ -1353,17 +1342,6 @@ class AdversarialMetaLearner:
         self.P_A_hist = np.ones(N_BINS) / N_BINS
         self.P_A_true = np.ones(N_BINS) / N_BINS
 
-        # History lists for metrics
-        self.loss_precision_history = []
-        self.loss_kl_history = []
-        self.loss_primary_history = []
-        self.total_loss_history = []
-        self.kl_divergence_history = []
-        self.kl_precision_history = []
-        self.grad_norm_precision_history = []
-        self.grad_norm_kl_history = []
-        self.grad_norm_primary_history = []
-
     def forward(self, x: np.ndarray) -> np.ndarray:
         """MLP forward pass: x → logits."""
         h = np.maximum(0, self.W1 @ x + self.b1)  # ReLU
@@ -1516,23 +1494,9 @@ class AdversarialMetaLearner:
         R_sigma = self.strategy_regulariser(sigma_d, sigma_a)
 
         # Total gradient (scalar KL term added to all weights uniformly)
-        loss_primary = self.cross_entropy_loss(x_adv, y)
-        loss_kl = lambda_w * kl_term
-        loss_precision = mu_w * R_sigma
-        total_loss_scalar = loss_primary + loss_kl + loss_precision
-
-        
-        # Append to histories
-        self.loss_primary_history.append(loss_primary)
-        self.loss_kl_history.append(loss_kl)
-        self.loss_precision_history.append(loss_precision)
-        self.total_loss_history.append(total_loss_scalar)
-        self.kl_divergence_history.append(kl_term)
-        self.kl_precision_history.append(0.0)  # Placeholder, as not computed
-        self.grad_norm_primary_history.append(np.linalg.norm(grads['W1']) + np.linalg.norm(grads['W2']))  # Example norm
-        self.grad_norm_kl_history.append(0.0)  # Placeholder
-        self.grad_norm_precision_history.append(0.0)  # Placeholder
-
+        total_loss_scalar = (self.cross_entropy_loss(x_adv, y)
+                             + lambda_w * kl_term
+                             + mu_w * R_sigma)
 
         # Adam update for each parameter group
         for (W, dW, mW, vW, mb, vb, db, b) in [
@@ -1692,8 +1656,8 @@ class DeceptionAwareParticleFilter:
           #                     self.observation_likelihood(
            #                        obs_d,
             #                       self.s_particles[i],
-            #                      self.delta_particles[i],
-            #                     self.sigma2_adaptive))
+             #                      self.delta_particles[i],
+              #                     self.sigma2_adaptive))
         dim = min(len(obs_d), self.d)
         obs_trunc  = obs_d[:dim]
         s_trunc    = self.s_particles[:, :dim]      # (N, dim)
@@ -1808,11 +1772,10 @@ class DeceptionAwareParticleFilter:
         where bucket^(j) = floor(attack_indicator^(j) * 10)
         """
         # R(b_i, a): per-device immediate reward
-        # Type-agnostic: effectiveness is average over all possible attack types
         eta_a  = float(DEF_ETA[action])
         cost_a = float(DEF_COST[action])
-        eff_a  = float(DEF_EFF_BASE[action])   # gap-agnostic, not ATK_ADVERS
-        R_ba   = health_i * eta_a - cost_a + p_attack_est * eff_a
+        eff_a2 = float(DEF_EFF[action, ATK_ADVERS])
+        R_ba   = health_i * eta_a - cost_a + p_attack_est * eff_a2
 
         # ∫ V(b') P(b'|b,a) db' ≈ Σ_j w^(j) · V_array[bucket_j]
         # Vectorized: single fancy-index (no dict, no list comprehension)
@@ -1892,14 +1855,6 @@ class AttackerAgent:
                * max(0.0, 1.0 - eta_defense))
         return float(np.clip(p_s, 0, 1))
 
-    def compute_detection_prob(self,
-                                p_success: float,
-                                delta_norm: float) -> float:
-        """
-        p_detect = max(0, 1 − p_success·0.7 − (‖δ‖/ε)·0.5)   Eq.39
-        """
-        p_d = 1.0 - p_success * 0.7 - (delta_norm / EPSILON_PERT) * 0.5
-        return float(max(0.0, p_d))
 
     def select_targets(self,
                         health_vector: np.ndarray,
@@ -1949,8 +1904,7 @@ class AttackerAgent:
     def generate_perturbation(self,
                                targets: List[int],
                                physical_state: HospitalPhysicalState,
-                               reasoning_level: int = 2,
-                               type_override: int = None) -> np.ndarray:
+                               reasoning_level: int = 2) -> np.ndarray:
         """
         Generate adversarial perturbation δ satisfying:
           f(s+δ) ≠ f(s)  while  P(s+δ) ≈ P(s)   Eq.30 / paper Sec.II-B
@@ -1958,37 +1912,7 @@ class AttackerAgent:
         At level 1: Camouflage (noise mimicking sensor noise)
         At level 2: Adaptive perturbation based on observed defender alerts
         Physiological plausibility enforced.
-
-        Parameters
-        ----------
-        type_override : if set, forces a specific attack type regardless of
-                        strategy.  Used by baseline_comparison.py to run
-                        cross-attack analysis across all five attack types.
         """
-        delta = np.zeros((self.n, D_STATE))
-
-        # If type_override is given, craft the perturbation directly for
-        # that attack type — bypasses strategy selection
-        if type_override is not None:
-            for tid in targets:
-                base_delta = np.zeros(D_STATE)
-                if type_override == ATK_SPOOFING:
-                    base_delta[3] = float(self.rng.uniform(0.5, 1.0))
-                elif type_override == ATK_ADVERS:
-                    base_delta[0] = -float(self.rng.uniform(10, 25)) / PHYSIO_STD['HR']
-                    base_delta[2] = -float(self.rng.uniform(3, 8))   / PHYSIO_STD['SpO2']
-                elif type_override == ATK_POISON:
-                    base_delta[D_SEC:D_SEC + 5] = float(self.rng.uniform(0.3, 0.6))
-                elif type_override == ATK_EXTRACT:
-                    base_delta[D_STATE - 5:] = float(self.rng.uniform(0.2, 0.4))
-                elif type_override == ATK_REPLAY:
-                    base_delta = -0.05 * physical_state.devices[tid].s.copy()
-                b_norm = np.linalg.norm(base_delta)
-                if b_norm > 1e-8:
-                    base_delta *= EPSILON_PERT / b_norm
-                delta[tid] = base_delta
-            self.delta_matrix = delta
-            return delta
         delta = np.zeros((self.n, D_STATE))
         strategy_idx = self.strategy_space.sample_strategy()
         strategy_name = self.strategy_space.strategy_names[strategy_idx]
@@ -2179,8 +2103,7 @@ class AttackerAgent:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 11.  DEFENDER AGENT  (Sec. VI-C, hospital Sec. 3.1, 3.3)
-# ══════════════════════════════════════════════════════════════════════════════
-
+# ════════════════════════════════════
 class DefenderAgent:
     """
     Hospital cybersecurity defender with hypergame-aware AI.
@@ -2301,7 +2224,7 @@ class DefenderAgent:
         for i in range(self.n):
             # CDSS anomaly score for patient-linked devices
             pid = self.topology.patient_map.get(i, -1)
-            if pid >= 0 and self.topology.device_types[i] in (DEV_MONITOR, DEV_WEARABLE, DEV_PUMP, DEV_VENT):
+            if pid >= 0 and self.topology.device_types[i] in (DEV_MONITOR, DEV_WEARABLE):
                 sensor_obs = physical_state.devices[i].r + delta_matrix[i, :NS] + xi_mat[i, :NS]
                 anomaly_scores[i] = self.cdss_anomaly_score(pid, sensor_obs, physical_state)
             else:
@@ -2412,24 +2335,18 @@ class DefenderAgent:
 
     def compute_defense_effectiveness(self,
                                        actions: np.ndarray,
-                                       gap_magnitudes: np.ndarray) -> np.ndarray:
+                                       attack_types: np.ndarray) -> np.ndarray:
         """
-        Per-device effectiveness η̄(d_i) · ρ_gap_i  (type-agnostic, Eq. gap extension).
-
-        The defender does not know the attack type — it responds to how large the
-        perception gap is (gap_magnitudes = δ_norm / ε_pert ∈ [0,1]).
-        Effectiveness scales with gap intensity: a defense that closes the gap
-        fully against a small perturbation provides less value against a large one.
-
-        Parameters
-        ----------
-        actions        : (N_DEVICES,) int — chosen defense action per device
-        gap_magnitudes : (N_DEVICES,) float — normalised perturbation norm ∈ [0,1]
+        Per-device effectiveness η(d_i, a_j) from Table I.
+        Returns effectiveness vector ∈ R^n.
         """
-        d_idx = np.clip(actions.astype(int), 0, N_DEF_ACTIONS - 1)
-        base  = DEF_EFF_BASE[d_idx]                  # (N_DEVICES,) type-agnostic base
-        # Scale by gap intensity: larger gap → effectiveness matters more
-        effectiveness = base * np.clip(gap_magnitudes, 0.0, 1.0)
+        effectiveness = np.zeros(self.n)
+        for i in range(self.n):
+            d_act = int(actions[i])
+            a_type = int(attack_types[i]) if i < len(attack_types) else ATK_ADVERS
+            d_act  = min(d_act,  N_DEF_ACTIONS - 1)
+            a_type = min(a_type, N_ATK_TYPES  - 1)
+            effectiveness[i] = DEF_EFF[d_act, a_type]
         return effectiveness
 
     def update_perception(self,
@@ -2447,10 +2364,10 @@ class DefenderAgent:
             P_observed[i] = float(np.linalg.norm(obs_matrix[i]) / D_STATE**0.5)
 
         # Gradient of U_D w.r.t. P_D: higher attack prob → higher utility gradient
-        # Type-agnostic: η̄(action) is the average gap-closing power of the action
         grad_UD = np.zeros(self.n)
         for i in range(self.n):
-            eta_i = DEF_EFF_BASE[int(self.active_defenses[i])]
+            # ∂U_D/∂p_attack_i ≈ expected utility gain from increasing vigilance
+            eta_i = DEF_EFF[int(self.active_defenses[i]), ATK_ADVERS]
             grad_UD[i] = eta_i * (1.0 - self.P_d.p_attack[i]) * 0.1
 
         hypergame.perception_update_dynamics(
@@ -2492,7 +2409,7 @@ def apply_attack_to_physical_state(
         obs_matrix: np.ndarray = None,
         particle_filters: List = None,
         lambda_val: float = 0.0,
-        mean_p_attack: float=0.1) -> Dict:
+        mean_p_attack: float = 0.1) -> Dict:
     """
     Applies attack outcomes to physical state.
     Modifies device health h_i, trust τ_i, and patient vitals.
@@ -2550,16 +2467,7 @@ def apply_attack_to_physical_state(
         a3       = float(np.clip(mean_p_attack, 0.0, 1.0))  # attack prior
 
         rho_snr  = delta_norm / (SIGMA_NOISE * np.sqrt(d_eff) + 1e-12)
-        #logit    = a1 * rho_snr + a2 * z_innov + a3 * lambda_val
-        # NP detection signal (unchanged core)
-        np_signal = a1 * rho_snr + a2 * z_innov
-
-        # Exponential amplifier (information advantage)
-        beta = 1.0  # interpretable gain parameter
-        amp  = np.exp(beta * lambda_val)
-
-        # Final logit (multiplicative coupling)
-        logit = np_signal * amp
+        logit    = a1 * rho_snr + a2 * z_innov + a3 * lambda_val
         p_detect = float(1.0 / (1.0 + np.exp(-logit)))
         detected = bool(rng.random() < p_detect)
 
@@ -2634,16 +2542,6 @@ class MetricsCollector:
         self.strategy_entropy_d: List[float] = []
         self.strategy_entropy_a: List[float] = []
         self.n_eff_history: List[float] = []
-        self.loss_precision_history: List[float] = []
-        self.loss_kl_history: List[float] = []
-        self.loss_primary_history: List[float] = []
-        self.total_loss_history: List[float] = []
-        self.kl_divergence_history: List[float] = []
-        self.kl_precision_history: List[float] = []
-        self.gradient_norm_history: List[float] = []
-        self.grad_norm_precision_history: List[float] = []
-        self.grad_norm_kl_history: List[float] = []
-        self.grad_norm_primary_history: List[float] = []
 
     def record_timestep(self,
                          health: float,
@@ -2660,16 +2558,7 @@ class MetricsCollector:
                          entropy_d: float,
                          entropy_a: float,
                          n_eff_mean: float,
-                         robustness: float,
-                         loss_precision: float = 0.0,
-                         loss_kl: float = 0.0,
-                         loss_primary: float = 0.0,
-                         total_loss: float = 0.0,
-                         kl_divergence: float = 0.0,
-                         kl_precision: float = 0.0,
-                         grad_norm_precision: float = 0.0,
-                         grad_norm_kl: float = 0.0,
-                         grad_norm_primary: float = 0.0):
+                         robustness: float):
         self.health_history.append(health)
         self.resilience_history.append(resilience)
         self.info_advantage_history.append(info_adv)
@@ -2685,15 +2574,6 @@ class MetricsCollector:
         self.strategy_entropy_a.append(entropy_a)
         self.n_eff_history.append(n_eff_mean)
         self.robustness_history.append(robustness)
-        self.loss_precision_history.append(loss_precision)
-        self.loss_kl_history.append(loss_kl)
-        self.loss_primary_history.append(loss_primary)
-        self.total_loss_history.append(total_loss)
-        self.kl_divergence_history.append(kl_divergence)
-        self.kl_precision_history.append(kl_precision)
-        self.grad_norm_precision_history.append(grad_norm_precision)
-        self.grad_norm_kl_history.append(grad_norm_kl)
-        self.grad_norm_primary_history.append(grad_norm_primary)
 
     @property
     def detection_rate(self) -> float:
@@ -2722,18 +2602,6 @@ class MetricsCollector:
             'mean_utility_d':     float(np.mean(self.utility_defender)) if self.utility_defender else 0.0,
             'mean_utility_a':     float(np.mean(self.utility_attacker)) if self.utility_attacker else 0.0,
             'mean_n_eff':         float(np.mean(self.n_eff_history)) if self.n_eff_history else 0.0,
-            'mean_entropy_d':     float(np.mean(self.strategy_entropy_d)) if self.strategy_entropy_d else 0.0,
-            'mean_entropy_a':     float(np.mean(self.strategy_entropy_a)) if self.strategy_entropy_a else 0.0,
-            'mean_loss_precision': float(np.mean(self.loss_precision_history)) if self.loss_precision_history else 0.0,
-            'mean_loss_kl': float(np.mean(self.loss_kl_history)) if self.loss_kl_history else 0.0,
-            'mean_loss_primary': float(np.mean(self.loss_primary_history)) if self.loss_primary_history else 0.0,
-            'mean_total_loss': float(np.mean(self.total_loss_history)) if self.total_loss_history else 0.0,
-            'mean_kl_divergence': float(np.mean(self.kl_divergence_history)) if self.kl_divergence_history else 0.0,
-            'mean_kl_precision': float(np.mean(self.kl_precision_history)) if self.kl_precision_history else 0.0,
-            #'mean_grad_norm': float(np.mean(self.gradient_norm_history)) if self.gradient_norm_history else 0.0,
-            'mean_grad_norm_precision': float(np.mean(self.grad_norm_precision_history)) if self.grad_norm_precision_history else 0.0,
-            'mean_grad_norm_kl': float(np.mean(self.grad_norm_kl_history)) if self.grad_norm_kl_history else 0.0,
-            'mean_grad_norm_primary': float(np.mean(self.grad_norm_primary_history)) if self.grad_norm_primary_history else 0.0,
         }
 
 
@@ -2910,13 +2778,11 @@ class HospitalHypergameSimulation:
             # ─────────────────────────────────────────────────────────────────
             # STEP 7: Compute effectiveness and apply attack outcomes
             # ─────────────────────────────────────────────────────────────────
-            # Type-agnostic: defender measures the perception gap (δ_norm / ε)
-            # not the attack type.  gap_magnitudes ∈ [0,1] per device.
-            gap_magnitudes = np.linalg.norm(delta_mat, axis=1) / (EPSILON_PERT + 1e-12)
-            gap_magnitudes = np.clip(gap_magnitudes, 0.0, 1.0)
+            # Attack type vector (all targeted devices use primary attack A2)
+            atk_type_vec = np.full(N_DEVICES, self.attacker.active_attack_type)
 
             effectiveness_vec = self.defender.compute_defense_effectiveness(
-                def_actions, gap_magnitudes)
+                def_actions, atk_type_vec)
 
             if targets:
                 atk_outcome = apply_attack_to_physical_state(
@@ -3065,16 +2931,6 @@ class HospitalHypergameSimulation:
                 entropy_a=self.attacker.strategy_space.entropy(),
                 n_eff_mean=n_eff_mean,
                 robustness=robustness,
-                loss_precision=self.defender.meta_learner.loss_precision_history[-1] if self.defender.meta_learner.loss_precision_history else 0.0,
-                loss_kl=self.defender.meta_learner.loss_kl_history[-1] if self.defender.meta_learner.loss_kl_history else 0.0,
-                loss_primary=self.defender.meta_learner.loss_primary_history[-1] if self.defender.meta_learner.loss_primary_history else 0.0,
-                total_loss=self.defender.meta_learner.total_loss_history[-1] if self.defender.meta_learner.total_loss_history else 0.0,
-                kl_divergence=self.defender.meta_learner.kl_divergence_history[-1] if self.defender.meta_learner.kl_divergence_history else 0.0,
-                kl_precision=self.defender.meta_learner.kl_precision_history[-1] if self.defender.meta_learner.kl_precision_history else 0.0,
-                #grad_norm=self.defender.meta_learner.grad_norm_history[-1] if self.defender.meta_learner.grad_norm_history else 0.0,
-                grad_norm_precision=self.defender.meta_learner.grad_norm_precision_history[-1] if self.defender.meta_learner.grad_norm_precision_history else 0.0,
-                grad_norm_kl=self.defender.meta_learner.grad_norm_kl_history[-1] if self.defender.meta_learner.grad_norm_kl_history else 0.0,
-                grad_norm_primary=self.defender.meta_learner.grad_norm_primary_history[-1] if self.defender.meta_learner.grad_norm_primary_history else 0.0,
             )
 
         return ep_metrics
@@ -3494,14 +3350,6 @@ def main(full_multiseed: bool = False):
         n_atk_total = np.array([m.n_attacks_total            for m in all_sim_results]),
         n_atk_det   = np.array([m.n_attacks_detected         for m in all_sim_results]),
         n_atk_suc   = np.array([m.n_attacks_success          for m in all_sim_results]),
-        loss_precision = np.array([m.loss_precision            for m in all_sim_results]),
-        loss_kl        = np.array([m.loss_kl                   for m in all_sim_results]),
-        loss_primary   = np.array([m.loss_primary              for m in all_sim_results]),
-        kl_divergence  = np.array([m.kl_divergence            for m in all_sim_results]),
-        kl_precision   = np.array([m.kl_precision             for m in all_sim_results]),
-        grad_norm_precision = np.array([m.grad_norm_precision     for m in all_sim_results]),
-        grad_norm_kl        = np.array([m.grad_norm_kl            for m in all_sim_results]),
-        grad_norm_primary   = np.array([m.grad_norm_primary       for m in all_sim_results]),
     )
     print(f"  Saved: {raw_path}")
 
@@ -3525,15 +3373,6 @@ def main(full_multiseed: bool = False):
         'epsilon_k_history': m.epsilon_k_history,
         'utility_defender': m.utility_defender,
         'utility_attacker': m.utility_attacker,
-        'kl_divergence': m.kl_divergence_history,
-        'loss_precision': m.kl_precision_history,
-        'loss_kl': m.loss_kl_history,
-        'loss_primary': m.loss_primary_history,
-        'kl_precision': m.kl_precision_history,
-        'grad_norm_precision': m.grad_norm_precision_history,
-        'grad_norm_kl': m.grad_norm_kl_history,
-        'grad_norm_primary': m.grad_norm_primary_history,
-
     } for m in all_sim_results])
     return multi_stats, all_sim_results
 
