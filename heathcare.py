@@ -1,12 +1,4 @@
 """
-=============================================================================
-Hypergame-Aware AI Defense for IoT Perception Attacks
-Smart Hospital Simulation — Full Implementation
-=============================================================================
-Implements every equation from the paper (Eq. 1–39) in a smart hospital
-IoT context: 350 medical devices, 50 patients, k=2 hypergame reasoning,
-adversarial meta-learning, POMDP belief update, particle filter defense.
-
 Device Layout:
   - 100 bedside monitors  (2 per patient, 50 patients)  [MONITOR]
   - 30  infusion pumps                                    [PUMP]
@@ -30,7 +22,7 @@ Defense actions (Table I): MONITOR | FIREWALL | ENCRYPTION | HONEYPOT |
                             DECEPTION | ISOLATION | ACCESS_CONTROL
 
 Reasoning levels k=0,1,2 for both players.
-=============================================================================
+
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -62,7 +54,7 @@ warnings.filterwarnings('ignore')
 # GLOBAL CONSTANTS  (match paper exactly)
 # ──────────────────────────────────────────────────────────────────────────────
 
-# --- Hospital topology ---
+#  Hospital topology 
 N_MONITORS   = 100          #100 bedside monitors
 N_PUMPS      = 30           # 30 infusion pumps
 N_VENTS      = 20          # 20 ventilators
@@ -70,7 +62,7 @@ N_WEARABLES  = 200          # 200 wearable sensors
 N_DEVICES    = N_MONITORS + N_PUMPS + N_VENTS + N_WEARABLES   # 350
 N_PATIENTS   = 50
 
-# --- State dimensions (paper Sec. VI-A2) ---
+#  State dimensions (paper Sec. VI-A2) 
 D_STATE      = 100          # device state vector dimension
 D_OPER       = 20           # d1 operating parameters
 D_SYS        = 20           # d2 system metrics
@@ -79,7 +71,7 @@ D_SEC        = 20           # d4 security features
 D_COMM       = 20           # d5 communication features
 NS           = 5            # physical sensor readings per device
 
-# --- Attack/defense parameters (paper Sec. VI-B,C,E) ---
+#  Attack/defense parameters (paper Sec. VI-B,C,E) 
 EPSILON_PERT = 0.15       # 0.15ℓ2-norm perturbation budget  (Eq.30,38)
 SIGMA_NOISE  = 0.05         #0.05Gaussian sensor noise σ       (Eq.33)
 P_EDGE       = 0.1          # Erdős–Rényi edge probability  (Eq.28)
@@ -91,11 +83,11 @@ ALPHA_RECOV  = 0.05         # trust recovery rate           (Sec. VI-E3)
 TRUST_LOW    = 0.4          # low-trust threshold           (Sec. VI-B3)
 HEALTH_LOW   = 0.7          # low-health threshold          (Sec. VI-B3)
 
-# --- Particle filter (paper Sec. VI-C2) ---
+#  Particle filter (paper Sec. VI-C2) 
 N_PARTICLES  = 100          # 200 number of particles in belief representation
 N_EFF_MIN    = 0.2 * N_PARTICLES        # = 200
 
-# --- Learning parameters (paper Sec. VI-E1) ---
+#  Learning parameters (paper Sec. VI-E1) 
 ETA          = 0.001        # learning rate (Adam)
 BETA_ADAM1   = 0.9
 BETA_ADAM2   = 0.999
@@ -108,12 +100,12 @@ LAMBDA_GAME  = 0.1          # perception advantage weight (Eq.5,9)
 MU_GAME      = 0.05         # strategy regularisation weight (Eq.20)
 OMEGA_META   = 0.3          # meta-gradient perception weight (Eq.19)
 
-# --- k-level reasoning ---
+#  k-level reasoning 
 K_DEFENDER   = 2
 K_ATTACKER   = 2
 EPS_CONV     = 1e-3         # Nash iteration convergence (Eq.37)
 
-# --- Simulation config ---
+#  Simulation config 
 N_EPISODES   = 50
 T_STEPS      = 200
 N_SEEDS      = 50
@@ -122,7 +114,7 @@ N_BINS       = 15           # discretisation bins for KL (Sec. VI-D2)
 #K_ADV_STEPS  = 15
 K_ADV_STEPS  = 5           # adversarial training steps per episode
 
-# --- Attack type indices ---
+#  Attack type indices 
 ATK_SPOOFING = 0            # A1
 ATK_ADVERS   = 1            # A2 — primary (Sec. VI-B2)
 ATK_POISON   = 2            # A3
@@ -130,7 +122,7 @@ ATK_EXTRACT  = 3            # A4
 ATK_REPLAY   = 4            # A5
 N_ATK_TYPES  = 5
 
-# --- Defense action indices (Table I) ---
+#  Defense action indices (Table I) 
 DEF_MONITOR      = 0
 DEF_FIREWALL     = 1
 DEF_ENCRYPTION   = 2
@@ -140,7 +132,7 @@ DEF_ISOLATION    = 5
 DEF_ACCESS_CTRL  = 6
 N_DEF_ACTIONS    = 7
 
-# --- Defense Table I: effectiveness η and cost c ---
+#  Defense Table I: effectiveness η and cost c 
 #     [MONITOR, FIREWALL, ENCRYPTION, HONEYPOT, DECEPTION, ISOLATION, ACCESS]
 DEF_ETA = np.array([1.0, 1.5, 1.5, 1.5, 1.5, 1.5, 1.0])
 DEF_COST = np.array([0.1, 0.5, 1.0, 0.8, 0.6, 1.2, 0.3])
@@ -266,7 +258,6 @@ class HospitalNetworkTopology:
 
     def _build_adjacency(self) -> np.ndarray:
         """
-        Hierarchical hospital IoT topology (replaces Erdős–Rényi).
         Three-tier segmentation: gateway (pump/vent) → bedside (monitor) → peripheral (wearable)
         VLAN isolation: no cross-ward edges.
         """
@@ -576,12 +567,12 @@ class PerceptionState:
         self.n = n_devices
         self.rng = rng
 
-        # --- Level-0 perception: distribution over device states ---
+        #  Level-0 perception: distribution over device states 
         # Represented as mean and variance of belief over s_i
         self.mu_belief  = rng.standard_normal((n_devices, D_STATE))
         self.var_belief = np.ones((n_devices, D_STATE))
 
-        # --- Level-1 perception ---
+        #  Level-1 perception 
         if player == 'defender':
             # Per-device attack probability
             self.p_attack = np.full(n_devices, 0.1)
@@ -614,11 +605,11 @@ class PerceptionState:
             # Defender's estimated utility weights (attacker's belief)
             self.u_hat_opponent = np.array([1.0, -1.0])
 
-        # --- Level-2 perception: second-order beliefs ---
+        #  Level-2 perception: second-order beliefs 
         # Player's belief about opponent's belief about own L0 perception
         self.l2_belief_about_opponent_l1 = np.ones(n_devices) * 0.1
 
-        # --- Perception mismatch matrix M_{i,j} ∈ R^{d×d} (Def.1) ---
+        #  Perception mismatch matrix M_{i,j} ∈ R^{d×d} (Def.1) 
         # Scalar proxy: mean KL between own and ground-truth perception
         self.mismatch_scalar = 0.0
 
@@ -909,7 +900,7 @@ def subjective_payoff(si: int, s_hat_j: int, player: str,
     Eq.6  (fully implemented, hospital context)
 
     Parameters
-    ----------
+    -
     si      : strategy index for player i
     s_hat_j : player i's belief about opponent strategy
     player  : 'defender' or 'attacker'
@@ -1314,7 +1305,7 @@ class AdversarialMetaLearner:
         self.rng = rng
         self.input_dim = input_dim
 
-        # --- Defender model parameters θ (2-layer MLP) ---
+        #  Defender model parameters θ (2-layer MLP) 
         hidden = 64
         # Layer 1: W1 ∈ R^{hidden × input_dim}, b1 ∈ R^{hidden}
         self.W1 = rng.normal(0, 0.01, (hidden, input_dim))
@@ -1384,10 +1375,8 @@ class AdversarialMetaLearner:
     
     def input_gradient(self, x: np.ndarray, y: int) -> np.ndarray:
         """
-        Compute ∇_δ L(θ, x+δ) = ∇_x L(θ, x) analytically via backprop.
-        Used in the inner maximisation of Eq.18 to replace finite differences.
 
-        By chain rule: ∇_δ L = W1^T · (W2^T(p - e_y) ⊙ 1[z1 > 0])
+         chain rule: ∇_δ L = W1^T · (W2^T(p - e_y) ⊙ 1[z1 > 0])
         Covers all input_dim dimensions exactly.
         """
         # Forward pass
@@ -1435,7 +1424,7 @@ class AdversarialMetaLearner:
             # Gradient ∇_δ L(θ, x+δ): treat δ as input perturbation
             # Compute via finite difference for stability
             # Gradient ∇_δ L(θ, x+δ): exact analytical gradient via backprop
-            # Covers all input_dim dimensions (replaces 5% finite difference)
+            # Covers all input_dim dimensions 
             grad_delta = self.input_gradient(x_adv, y)
 
             # Perception misalignment gradient ∇_δ β R(P^D, P^A)
@@ -1569,7 +1558,6 @@ class DeceptionAwareParticleFilter:
         self.belief_cov  = np.eye(self.d)
 
         # Value function approximation (table over health levels)
-        # V_table replaced with fixed-size numpy array (10 health buckets)
         # ~7x faster than dict lookup for q_value inner loop
         self.V_array: np.ndarray = np.zeros(10)
 
@@ -1623,18 +1611,18 @@ class DeceptionAwareParticleFilter:
         """
         dim = min(len(obs_d), self.d)
 
-        # --- 1. Innovation for deception detection ---
+        #  1. Innovation for deception detection 
         belief_pred = self.belief_mean[:dim]
         innovation = obs_d[:dim] - belief_pred
         attack_suspected = self.detect_deception(innovation)
 
-        # --- 2. Adaptive variance  σ² → 9σ²  under suspected attack (Sec.VI-C2) ---
+        #  2. Adaptive variance  σ² → 9σ²  under suspected attack (Sec.VI-C2) 
         if attack_suspected:
             self.sigma2_adaptive = 9.0 * SIGMA_NOISE**2
         else:
             self.sigma2_adaptive = SIGMA_NOISE**2
 
-        # --- 3. State transition: P(s',δ'|s,δ,a^D_t) ---
+        #  3. State transition: P(s',δ'|s,δ,a^D_t) 
         # Stochastic AR(1) transition for state particles
         if pregenerated_noise is not None:
             self.s_particles += pregenerated_noise
@@ -1649,7 +1637,7 @@ class DeceptionAwareParticleFilter:
             self.delta_particles += self.rng.normal(0, 0.01,
                                                      self.delta_particles.shape)
 
-        # --- 4. Weight update: P(o^D_{t+1}|s',δ') ---
+        #  4. Weight update: P(o^D_{t+1}|s',δ') 
         #new_weights = np.zeros(self.N)
         #for i in range(self.N):
          #   new_weights[i] = (self.weights[i] *
@@ -1675,21 +1663,21 @@ class DeceptionAwareParticleFilter:
             new_weights /= w_sum
         self.weights = new_weights
 
-        # --- 5. Update attack indicators ---
+        #  5. Update attack indicators 
         # Attack indicator based on δ magnitude
         delta_norms = np.linalg.norm(self.delta_particles, axis=1)
         self.attack_indicators = (delta_norms > EPSILON_PERT * 0.5).astype(float)
 
-        # --- 6. Resampling if N_eff < N_min_eff (Sec.VI-C2) ---
+        #  6. Resampling if N_eff < N_min_eff (Sec.VI-C2) 
         N_eff = self.effective_sample_size()
         if N_eff < N_EFF_MIN:
             self._kernel_density_resample(kde_noise=kde_noise, guided_noise=guided_noise)
 
-        # --- 7. Update belief mean (weighted average via matmul — faster than np.average) ---
+        #  7. Update belief mean (weighted average via matmul — faster than np.average) 
         self.belief_mean = self.weights @ self.s_particles  # (N,)@(N,d) → (d,)
         # belief_cov intentionally skipped: O(N·d²) and unused by callers
 
-        # --- 8. Compute per-device attack probability ---
+        #  8. Compute per-device attack probability 
         p_attack_est = float(np.dot(self.weights, self.attack_indicators))
 
         return {
@@ -1950,7 +1938,7 @@ class AttackerAgent:
                     base_delta[0] = tv_shift / PHYSIO_STD['TidalV']
 
                 if strategy_name == 'Camouflage':
-                    # Add noise to mimic sensor noise  (Level 1)
+                    #noise to mimic sensor noise  (Level 1)
                     base_delta += self.rng.normal(0, SIGMA_NOISE, D_STATE)
 
                 elif strategy_name == 'MimicClinician':
@@ -2032,7 +2020,7 @@ class AttackerAgent:
                 delta[tid] = self.rng.normal(0, probe_magnitude, D_STATE)
 
             elif strategy_name == 'DataReplay':
-                # Replay: replace with historical normal data (zero perturbation
+                # Replay:historical normal data (zero perturbation
                 # to physical state, but manipulates temporal consistency)
                 delta[tid] = np.zeros(D_STATE)
 
@@ -2981,7 +2969,7 @@ class MultiSeedExperiment:
         print(f"{'#'*70}\n")
 
         for seed_idx, seed in enumerate(self.seeds):
-            print(f"\n--- Seed {seed_idx+1}/{self.n_seeds} (ζ={seed}) ---")
+            print(f"\n Seed {seed_idx+1}/{self.n_seeds} (ζ={seed}) ")
             sim = HospitalHypergameSimulation(seed=seed)
             all_ep_metrics = sim.run()
 
